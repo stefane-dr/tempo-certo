@@ -30,12 +30,13 @@ def send_telegram(message):
 
 def send_ntfy(message):
     url = f"https://ntfy.sh/{config.NTFY_TOPIC}"
-    requests.post(
+    resp = requests.post(
         url,
         data=strip_markdown(message).encode("utf-8"),
         headers={"Title": "Tempo Certo", "Tags": "sunny,shirt"},
         timeout=10,
     )
+    resp.raise_for_status()
 
 
 def get_telegram_first_name():

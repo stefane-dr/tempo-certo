@@ -82,3 +82,66 @@ def test_get_telegram_first_name_none_on_missing_field(monkeypatch):
     monkeypatch.setattr(notifiers.requests, "get", _fake_get)
 
     assert notifiers.get_telegram_first_name() is None
+
+
+def test_ntfy_reports_http_errors_and_logs_failed_delivery(monkeypatch, caplog):
+    import pytest
+
+    monkeypatch.setattr(config, "NOTIFY_METHOD", "ntfy")
+    monkeypatch.setattr(config, "FALLBACK_NOTIFY_METHODS", [])
+    monkeypatch.setattr(notifiers.requests, "post", lambda *a, **k: _FakeResponse({}, 429))
+    with pytest.raises(requests.HTTPError, match="429"):
+        notifiers.notify("Synthetic weather message")
+    assert "Notification via ntfy failed: 429 error" in caplog.text
+
+
+def test_ntfy_http_failure_uses_configured_fallback(monkeypatch):
+    calls = []
+    monkeypatch.setattr(config, "NOTIFY_METHOD", "ntfy")
+    monkeypatch.setattr(config, "FALLBACK_NOTIFY_METHODS", ["email"])
+    monkeypatch.setattr(notifiers.requests, "post", lambda *a, **k: _FakeResponse({}, 503))
+    monkeypatch.setitem(notifiers.NOTIFY_SENDERS, "email", calls.append)
+    notifiers.notify("Synthetic weather message")
+    assert calls == ["Synthetic weather message"]
+
+
+def test_ntfy_success_keeps_plain_text_payload(monkeypatch):
+    calls = []
+    monkeypatch.setattr(config, "NTFY_TOPIC", "synthetic-topic")
+    def post(url, **kwargs):
+        calls.append((url, kwargs))
+        return _FakeResponse({}, 200)
+    monkeypatch.setattr(notifiers.requests, "post", post)
+    notifiers.send_ntfy("*Bonjour* été")
+    assert calls == [("https://ntfy.sh/synthetic-topic", {
+        "data": "Bonjour été".encode("utf-8"),
+        "headers": {"Title": "Tempo Certo", "Tags": "sunny,shirt"},
+        "timeout": 10,
+    })]
+
+
+def test_main_exits_nonzero_when_ntfy_rejects_notification(monkeypatch, caplog):
+    import importlib
+    import logging
+    import pytest
+    from tempo_certo import log_setup
+
+    monkeypatch.setattr(log_setup, "setup_logging", lambda: logging.getLogger("tempo-test"))
+    entry = importlib.import_module("tempo_certo.__main__")
+    monkeypatch.setattr(config, "NOTIFY_METHOD", "ntfy")
+    monkeypatch.setattr(config, "FALLBACK_NOTIFY_METHODS", [])
+    monkeypatch.setattr(config, "DRY_RUN", False)
+    monkeypatch.setattr(entry, "validate_credentials", lambda: None)
+    monkeypatch.setattr(entry, "fetch_forecast", lambda: {})
+    monkeypatch.setattr(entry, "hours_today", lambda data: [{"hour": 9}])
+    monkeypatch.setattr(entry, "sunrise_hour", lambda data: 7)
+    monkeypatch.setattr(entry, "analyze_windows", lambda *args: {})
+    monkeypatch.setattr(entry, "analyze_clothing", lambda *args: {})
+    monkeypatch.setattr(entry, "build_message", lambda *args: "Synthetic weather message")
+    monkeypatch.setattr(entry, "send_error_email", lambda *args: None)
+    monkeypatch.setattr(entry, "send_report_email", lambda **kwargs: None)
+    monkeypatch.setattr(notifiers.requests, "post", lambda *a, **k: _FakeResponse({}, 503))
+    with pytest.raises(SystemExit) as exc:
+        entry.main()
+    assert exc.value.code == 1
+    assert "503 error" in caplog.text
